@@ -1,50 +1,9 @@
-import { createClient, type Client } from "@libsql/client";
-
-// ── Client singleton ──────────────────────────────────────────────────────────
-// - Production (Vercel): uses TURSO_DATABASE_URL + TURSO_AUTH_TOKEN
-// - Development (local): uses a local file via libsql file: protocol
-
-let _client: Client | null = null;
-
-function getClient(): Client {
-  if (_client) return _client;
-
-  const url = process.env.TURSO_DATABASE_URL;
-  const authToken = process.env.TURSO_AUTH_TOKEN;
-
-  if (url && authToken && !url.includes("your-db-name")) {
-    // Turso cloud — use https:// protocol for better serverless compatibility
-    const httpUrl = url.replace(/^libsql:\/\//, "https://");
-    _client = createClient({ url: httpUrl, authToken });
-  } else {
-    // Local file fallback for development
-    _client = createClient({ url: "file:data/study.db" });
-  }
-
-  return _client;
-}
-
-// ── Schema init ───────────────────────────────────────────────────────────────
-
-let schemaInitialized = false;
-
-async function ensureSchema(): Promise<void> {
-  if (schemaInitialized) return;
-  const db = getClient();
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS exercises (
-      id              TEXT PRIMARY KEY,
-      guia_id         TEXT NOT NULL,
-      exercise_number INTEGER,
-      status          TEXT DEFAULT 'pendiente',
-      my_answer       TEXT,
-      attempts        INTEGER DEFAULT 0,
-      last_attempt_at TEXT,
-      ai_feedback     TEXT
-    )
-  `);
-  schemaInitialized = true;
-}
+/**
+ * DB layer — uses Turso's HTTP pipeline API directly in production,
+ * and @libsql/client with a local file in development.
+ *
+ * This avoids the resp.body?.cancel bug in @libsql/hrana-client.
+ */
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -59,49 +18,158 @@ export interface ExerciseRow {
   ai_feedback: string | null;
 }
 
-// ── Safe wrapper ──────────────────────────────────────────────────────────────
-// Returns a fallback value instead of crashing if DB is unreachable.
+type SqlArg = string | number | null;
 
-async function safeQuery<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
+// ── Turso HTTP client ─────────────────────────────────────────────────────────
+
+interface TursoResult {
+  cols: { name: string }[];
+  rows: (string | number | null)[][];
+  affected_row_count: number;
+}
+
+async function tursoQuery(
+  sql: string,
+  args: SqlArg[] = []
+): Promise<TursoResult> {
+  const url = process.env.TURSO_DATABASE_URL!.replace(/^libsql:\/\//, "https://");
+  const token = process.env.TURSO_AUTH_TOKEN!;
+
+  const body = {
+    requests: [
+      {
+        type: "execute",
+        stmt: {
+          sql,
+          args: args.map((a) =>
+            a === null
+              ? { type: "null" }
+              : typeof a === "number"
+              ? { type: "integer", value: String(a) }
+              : { type: "text", value: String(a) }
+          ),
+        },
+      },
+      { type: "close" },
+    ],
+  };
+
+  const res = await fetch(`${url}/v2/pipeline`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Turso HTTP ${res.status}: ${text}`);
+  }
+
+  const data = await res.json();
+  const first = data.results?.[0];
+  if (first?.type === "error") {
+    throw new Error(`Turso error: ${first.error?.message}`);
+  }
+
+  return first?.response?.result ?? { cols: [], rows: [], affected_row_count: 0 };
+}
+
+function rowsToObjects(result: TursoResult): Record<string, SqlArg>[] {
+  return result.rows.map((row) =>
+    Object.fromEntries(result.cols.map((col, i) => [col.name, row[i]]))
+  );
+}
+
+// ── Local SQLite fallback (dev) ───────────────────────────────────────────────
+
+import { createClient, type Client } from "@libsql/client";
+
+let _localClient: Client | null = null;
+
+function getLocalClient(): Client {
+  if (_localClient) return _localClient;
+  _localClient = createClient({ url: "file:data/study.db" });
+  return _localClient;
+}
+
+async function localQuery(sql: string, args: SqlArg[] = []): Promise<TursoResult> {
+  const db = getLocalClient();
+  const res = await db.execute({ sql, args });
+  return {
+    cols: res.columns.map((name) => ({ name })),
+    rows: res.rows.map((r) => Array.from(r) as SqlArg[]),
+    affected_row_count: res.rowsAffected,
+  };
+}
+
+// ── Unified query function ────────────────────────────────────────────────────
+
+function isCloud(): boolean {
+  const url = process.env.TURSO_DATABASE_URL ?? "";
+  const token = process.env.TURSO_AUTH_TOKEN ?? "";
+  return !!url && !!token && !url.includes("your-db-name");
+}
+
+async function query(sql: string, args: SqlArg[] = []): Promise<TursoResult> {
+  if (isCloud()) return tursoQuery(sql, args);
+  return localQuery(sql, args);
+}
+
+// ── Schema init ───────────────────────────────────────────────────────────────
+
+let schemaReady = false;
+
+async function ensureSchema(): Promise<void> {
+  if (schemaReady) return;
+  await query(`
+    CREATE TABLE IF NOT EXISTS exercises (
+      id              TEXT PRIMARY KEY,
+      guia_id         TEXT NOT NULL,
+      exercise_number INTEGER,
+      status          TEXT DEFAULT 'pendiente',
+      my_answer       TEXT,
+      attempts        INTEGER DEFAULT 0,
+      last_attempt_at TEXT,
+      ai_feedback     TEXT
+    )
+  `);
+  schemaReady = true;
+}
+
+// ── Safe wrapper ──────────────────────────────────────────────────────────────
+
+async function safe<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
   try {
     return await fn();
   } catch (err) {
-    console.error("[DB] Query failed:", err instanceof Error ? err.message : err);
+    console.error("[DB]", err instanceof Error ? err.message : err);
     return fallback;
   }
 }
 
-// ── Queries ───────────────────────────────────────────────────────────────────
-
-export async function getExercise(id: string): Promise<ExerciseRow | undefined> {
-  return safeQuery(async () => {
-    await ensureSchema();
-    const db = getClient();
-    const res = await db.execute({ sql: "SELECT * FROM exercises WHERE id = ?", args: [id] });
-    return res.rows[0] as unknown as ExerciseRow | undefined;
-  }, undefined);
-}
+// ── Public queries ────────────────────────────────────────────────────────────
 
 export async function getExercisesByGuia(guiaId: string): Promise<ExerciseRow[]> {
-  return safeQuery(async () => {
+  return safe(async () => {
     await ensureSchema();
-    const db = getClient();
-    const res = await db.execute({
-      sql: "SELECT * FROM exercises WHERE guia_id = ? ORDER BY exercise_number ASC",
-      args: [guiaId],
-    });
-    return res.rows as unknown as ExerciseRow[];
+    const res = await query(
+      "SELECT * FROM exercises WHERE guia_id = ? ORDER BY exercise_number ASC",
+      [guiaId]
+    );
+    return rowsToObjects(res) as unknown as ExerciseRow[];
   }, []);
 }
 
 export async function getAllExercises(): Promise<ExerciseRow[]> {
-  return safeQuery(async () => {
+  return safe(async () => {
     await ensureSchema();
-    const db = getClient();
-    const res = await db.execute(
+    const res = await query(
       "SELECT * FROM exercises ORDER BY guia_id, exercise_number ASC"
     );
-    return res.rows as unknown as ExerciseRow[];
+    return rowsToObjects(res) as unknown as ExerciseRow[];
   }, []);
 }
 
@@ -110,13 +178,12 @@ export async function ensureExerciseExists(
   guiaId: string,
   exerciseNumber: number
 ): Promise<void> {
-  return safeQuery(async () => {
+  return safe(async () => {
     await ensureSchema();
-    const db = getClient();
-    await db.execute({
-      sql: "INSERT OR IGNORE INTO exercises (id, guia_id, exercise_number) VALUES (?, ?, ?)",
-      args: [id, guiaId, exerciseNumber],
-    });
+    await query(
+      "INSERT OR IGNORE INTO exercises (id, guia_id, exercise_number) VALUES (?, ?, ?)",
+      [id, guiaId, exerciseNumber]
+    );
   }, undefined);
 }
 
@@ -126,46 +193,40 @@ export async function updateExerciseStatus(
   answer?: string,
   aiFeedback?: string
 ): Promise<void> {
-  return safeQuery(async () => {
+  return safe(async () => {
     await ensureSchema();
-    const db = getClient();
-    await db.execute({
-      sql: `
-        UPDATE exercises
-        SET status          = ?,
-            my_answer       = COALESCE(?, my_answer),
-            attempts        = attempts + 1,
-            last_attempt_at = ?,
-            ai_feedback     = COALESCE(?, ai_feedback)
-        WHERE id = ?
-      `,
-      args: [status, answer ?? null, new Date().toISOString(), aiFeedback ?? null, id],
-    });
+    await query(
+      `UPDATE exercises
+       SET status          = ?,
+           my_answer       = COALESCE(?, my_answer),
+           attempts        = attempts + 1,
+           last_attempt_at = ?,
+           ai_feedback     = COALESCE(?, ai_feedback)
+       WHERE id = ?`,
+      [status, answer ?? null, new Date().toISOString(), aiFeedback ?? null, id]
+    );
   }, undefined);
 }
 
 export async function upsertExercise(
   row: Partial<ExerciseRow> & { id: string; guia_id: string }
 ): Promise<void> {
-  return safeQuery(async () => {
+  return safe(async () => {
     await ensureSchema();
-    const db = getClient();
-    await db.execute({
-      sql: `
-        INSERT INTO exercises (id, guia_id, exercise_number, status, my_answer, attempts, last_attempt_at, ai_feedback)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-          status          = COALESCE(excluded.status, status),
-          my_answer       = COALESCE(excluded.my_answer, my_answer),
-          attempts        = COALESCE(excluded.attempts, attempts),
-          last_attempt_at = COALESCE(excluded.last_attempt_at, last_attempt_at),
-          ai_feedback     = COALESCE(excluded.ai_feedback, ai_feedback)
-      `,
-      args: [
+    await query(
+      `INSERT INTO exercises (id, guia_id, exercise_number, status, my_answer, attempts, last_attempt_at, ai_feedback)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         status          = COALESCE(excluded.status, status),
+         my_answer       = COALESCE(excluded.my_answer, my_answer),
+         attempts        = COALESCE(excluded.attempts, attempts),
+         last_attempt_at = COALESCE(excluded.last_attempt_at, last_attempt_at),
+         ai_feedback     = COALESCE(excluded.ai_feedback, ai_feedback)`,
+      [
         row.id, row.guia_id, row.exercise_number ?? null,
         row.status ?? "pendiente", row.my_answer ?? null,
         row.attempts ?? 0, row.last_attempt_at ?? null, row.ai_feedback ?? null,
-      ],
-    });
+      ]
+    );
   }, undefined);
 }
