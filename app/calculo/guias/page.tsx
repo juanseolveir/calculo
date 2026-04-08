@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import Link from "next/link";
 import { loadAllGuias } from "@/lib/parser";
 import { getExercisesByGuia } from "@/lib/db";
@@ -11,8 +13,15 @@ const TEMA_LABELS: Record<string, string> = {
   integrales: "Integrales",
 };
 
-export default function GuiasPage() {
+export default async function GuiasPage() {
   const guias = loadAllGuias();
+
+  const guiaData = await Promise.all(
+    guias.map(async (guia) => {
+      const rows = await getExercisesByGuia(guia.id);
+      return { guia, rows };
+    })
+  );
 
   return (
     <div>
@@ -22,8 +31,7 @@ export default function GuiasPage() {
       </div>
 
       <div className="grid gap-4 sm:grid-cols-2">
-        {guias.map((guia) => {
-          const rows = getExercisesByGuia(guia.id);
+        {guiaData.map(({ guia, rows }) => {
           const total = guia.exercises.length;
           const hechos = rows.filter((r) => r.status === "hecho").length;
           const revision = rows.filter((r) => r.status === "revision").length;
@@ -42,42 +50,26 @@ export default function GuiasPage() {
                   </div>
                   <div>
                     <h2 className="font-semibold text-slate-900">{guia.titulo}</h2>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      {TEMA_LABELS[guia.tema] ?? guia.tema}
-                    </p>
+                    <p className="text-xs text-slate-400 mt-0.5">{TEMA_LABELS[guia.tema] ?? guia.tema}</p>
                   </div>
                 </div>
                 <ChevronRight className="w-4 h-4 text-slate-300 group-hover:text-blue-400 transition-colors mt-1" />
               </div>
 
-              {/* Progress bar */}
               <div className="mb-3">
                 <div className="flex justify-between text-xs text-slate-500 mb-1.5">
                   <span>{hechos} / {total} completados</span>
                   <span className="font-medium">{pct}%</span>
                 </div>
                 <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden">
-                  <div
-                    className="h-full bg-blue-500 rounded-full transition-all"
-                    style={{ width: `${pct}%` }}
-                  />
+                  <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
                 </div>
               </div>
 
-              {/* Status summary */}
               <div className="flex gap-4 text-xs text-slate-500">
-                <span className="flex items-center gap-1">
-                  <StatusDot status="hecho" size="sm" />
-                  {hechos} hechos
-                </span>
-                <span className="flex items-center gap-1">
-                  <StatusDot status="revision" size="sm" />
-                  {revision} en revisión
-                </span>
-                <span className="flex items-center gap-1">
-                  <StatusDot status="pendiente" size="sm" />
-                  {total - hechos - revision} pendientes
-                </span>
+                <span className="flex items-center gap-1"><StatusDot status="hecho" size="sm" />{hechos} hechos</span>
+                <span className="flex items-center gap-1"><StatusDot status="revision" size="sm" />{revision} en revisión</span>
+                <span className="flex items-center gap-1"><StatusDot status="pendiente" size="sm" />{total - hechos - revision} pendientes</span>
               </div>
             </Link>
           );

@@ -13,12 +13,9 @@ function numericCheck(expected: string, given: string): boolean {
   const a = normalizeNum(expected);
   const b = normalizeNum(given);
   if (a === b) return true;
-  // Float comparison with tolerance
   const fa = parseFloat(a);
   const fb = parseFloat(b);
-  if (!isNaN(fa) && !isNaN(fb)) {
-    return Math.abs(fa - fb) < 1e-4;
-  }
+  if (!isNaN(fa) && !isNaN(fb)) return Math.abs(fa - fb) < 1e-4;
   return false;
 }
 
@@ -31,7 +28,7 @@ export async function updateExerciseAction(
   respuestaModelo: string,
   myAnswer: string
 ): Promise<{ status: string; feedback: string }> {
-  ensureExerciseExists(id, guiaId, 0);
+  await ensureExerciseExists(id, guiaId, 0);
 
   if (tipo === "numerico") {
     const correct = numericCheck(respuestaModelo, myAnswer);
@@ -39,8 +36,7 @@ export async function updateExerciseAction(
     const feedback = correct
       ? `¡Correcto! La respuesta es ${respuestaModelo}.`
       : `Incorrecto. Revisá tu cálculo. Respuesta esperada: ${respuestaModelo}.`;
-
-    updateExerciseStatus(id, status, myAnswer, feedback);
+    await updateExerciseStatus(id, status, myAnswer, feedback);
     revalidatePath("/calculo");
     revalidatePath(`/calculo/guias/${guiaId}`);
     return { status, feedback };
@@ -49,19 +45,23 @@ export async function updateExerciseAction(
   // Desarrollo → call Gemini
   try {
     const result = await callGemini(respuestaModelo, myAnswer);
-    updateExerciseStatus(id, result.status as "pendiente" | "revision" | "hecho", myAnswer, result.feedback);
+    await updateExerciseStatus(
+      id,
+      result.status as "pendiente" | "revision" | "hecho",
+      myAnswer,
+      result.feedback
+    );
     revalidatePath("/calculo");
     revalidatePath(`/calculo/guias/${guiaId}`);
     return result;
   } catch (err) {
     console.error("Gemini API error:", err);
-    // Fallback: mark as revision
     const fallback = {
       status: "revision",
       feedback:
         "No se pudo conectar con el evaluador automático. Revisá tu respuesta manualmente.",
     };
-    updateExerciseStatus(id, "revision", myAnswer, fallback.feedback);
+    await updateExerciseStatus(id, "revision", myAnswer, fallback.feedback);
     revalidatePath("/calculo");
     revalidatePath(`/calculo/guias/${guiaId}`);
     return fallback;
@@ -69,8 +69,8 @@ export async function updateExerciseAction(
 }
 
 export async function markDoneAction(id: string, guiaId: string): Promise<void> {
-  ensureExerciseExists(id, guiaId, 0);
-  updateExerciseStatus(id, "hecho", undefined, undefined);
+  await ensureExerciseExists(id, guiaId, 0);
+  await updateExerciseStatus(id, "hecho");
   revalidatePath("/calculo");
   revalidatePath(`/calculo/guias/${guiaId}`);
 }
@@ -116,23 +116,15 @@ Tu tarea:
   }
 
   const data = await response.json();
-  const text: string =
-    data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-
-  // Parse JSON from response
+  const text: string = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
   const jsonMatch = text.match(/\{[\s\S]*\}/);
   if (!jsonMatch) throw new Error("Invalid Gemini response format");
 
   const parsed = JSON.parse(jsonMatch[0]);
-  const cal: string = parsed.calificacion ?? "incorrecto";
-  const statusMap: Record<string, string> = {
-    correcto: "hecho",
-    parcial: "revision",
-    incorrecto: "revision",
-  };
+  const statusMap: Record<string, string> = { correcto: "hecho", parcial: "revision", incorrecto: "revision" };
 
   return {
-    status: statusMap[cal] ?? "revision",
+    status: statusMap[parsed.calificacion ?? "incorrecto"] ?? "revision",
     feedback: parsed.feedback ?? "Sin feedback.",
   };
 }

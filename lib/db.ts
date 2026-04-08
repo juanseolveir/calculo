@@ -1,28 +1,38 @@
-import Database from "better-sqlite3";
-import path from "path";
-import fs from "fs";
+import { createClient, type Client } from "@libsql/client";
 
-const DB_PATH = path.join(process.cwd(), "data", "study.db");
+// ── Client singleton ──────────────────────────────────────────────────────────
+// - Production (Vercel): uses TURSO_DATABASE_URL + TURSO_AUTH_TOKEN
+// - Development (local): uses a local file via libsql file: protocol
 
-// Ensure data dir exists
-const dataDir = path.join(process.cwd(), "data");
-if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
+let _client: Client | null = null;
+
+function getClient(): Client {
+  if (_client) return _client;
+
+  const url = process.env.TURSO_DATABASE_URL;
+  const authToken = process.env.TURSO_AUTH_TOKEN;
+
+  if (url && authToken) {
+    // Turso cloud
+    _client = createClient({ url, authToken });
+  } else {
+    // Local file fallback for development
+    _client = createClient({
+      url: "file:data/study.db",
+    });
+  }
+
+  return _client;
 }
 
-let _db: Database.Database | null = null;
+// ── Schema init ───────────────────────────────────────────────────────────────
 
-export function getDb(): Database.Database {
-  if (_db) return _db;
-  _db = new Database(DB_PATH);
-  _db.pragma("journal_mode = WAL");
-  _db.pragma("foreign_keys = ON");
-  initSchema(_db);
-  return _db;
-}
+let schemaInitialized = false;
 
-function initSchema(db: Database.Database) {
-  db.exec(`
+async function ensureSchema(): Promise<void> {
+  if (schemaInitialized) return;
+  const db = getClient();
+  await db.execute(`
     CREATE TABLE IF NOT EXISTS exercises (
       id              TEXT PRIMARY KEY,
       guia_id         TEXT NOT NULL,
@@ -32,11 +42,12 @@ function initSchema(db: Database.Database) {
       attempts        INTEGER DEFAULT 0,
       last_attempt_at TEXT,
       ai_feedback     TEXT
-    );
+    )
   `);
+  schemaInitialized = true;
 }
 
-// ── Types ────────────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface ExerciseRow {
   id: string;
@@ -49,86 +60,103 @@ export interface ExerciseRow {
   ai_feedback: string | null;
 }
 
-// ── Queries ──────────────────────────────────────────────────────────────────
+// ── Queries ───────────────────────────────────────────────────────────────────
 
-export function getExercise(id: string): ExerciseRow | undefined {
-  const db = getDb();
-  return db
-    .prepare("SELECT * FROM exercises WHERE id = ?")
-    .get(id) as ExerciseRow | undefined;
+export async function getExercise(id: string): Promise<ExerciseRow | undefined> {
+  await ensureSchema();
+  const db = getClient();
+  const res = await db.execute({
+    sql: "SELECT * FROM exercises WHERE id = ?",
+    args: [id],
+  });
+  return res.rows[0] as unknown as ExerciseRow | undefined;
 }
 
-export function getExercisesByGuia(guiaId: string): ExerciseRow[] {
-  const db = getDb();
-  return db
-    .prepare(
-      "SELECT * FROM exercises WHERE guia_id = ? ORDER BY exercise_number ASC"
-    )
-    .all(guiaId) as ExerciseRow[];
+export async function getExercisesByGuia(guiaId: string): Promise<ExerciseRow[]> {
+  await ensureSchema();
+  const db = getClient();
+  const res = await db.execute({
+    sql: "SELECT * FROM exercises WHERE guia_id = ? ORDER BY exercise_number ASC",
+    args: [guiaId],
+  });
+  return res.rows as unknown as ExerciseRow[];
 }
 
-export function getAllExercises(): ExerciseRow[] {
-  const db = getDb();
-  return db
-    .prepare("SELECT * FROM exercises ORDER BY guia_id, exercise_number ASC")
-    .all() as ExerciseRow[];
+export async function getAllExercises(): Promise<ExerciseRow[]> {
+  await ensureSchema();
+  const db = getClient();
+  const res = await db.execute(
+    "SELECT * FROM exercises ORDER BY guia_id, exercise_number ASC"
+  );
+  return res.rows as unknown as ExerciseRow[];
 }
 
-export function upsertExercise(row: Partial<ExerciseRow> & { id: string; guia_id: string }): void {
-  const db = getDb();
-  db.prepare(`
-    INSERT INTO exercises (id, guia_id, exercise_number, status, my_answer, attempts, last_attempt_at, ai_feedback)
-    VALUES (@id, @guia_id, @exercise_number, @status, @my_answer, @attempts, @last_attempt_at, @ai_feedback)
-    ON CONFLICT(id) DO UPDATE SET
-      status          = COALESCE(excluded.status, status),
-      my_answer       = COALESCE(excluded.my_answer, my_answer),
-      attempts        = COALESCE(excluded.attempts, attempts),
-      last_attempt_at = COALESCE(excluded.last_attempt_at, last_attempt_at),
-      ai_feedback     = COALESCE(excluded.ai_feedback, ai_feedback)
-  `).run({
-    id: row.id,
-    guia_id: row.guia_id,
-    exercise_number: row.exercise_number ?? null,
-    status: row.status ?? "pendiente",
-    my_answer: row.my_answer ?? null,
-    attempts: row.attempts ?? 0,
-    last_attempt_at: row.last_attempt_at ?? null,
-    ai_feedback: row.ai_feedback ?? null,
+export async function ensureExerciseExists(
+  id: string,
+  guiaId: string,
+  exerciseNumber: number
+): Promise<void> {
+  await ensureSchema();
+  const db = getClient();
+  await db.execute({
+    sql: "INSERT OR IGNORE INTO exercises (id, guia_id, exercise_number) VALUES (?, ?, ?)",
+    args: [id, guiaId, exerciseNumber],
   });
 }
 
-export function updateExerciseStatus(
+export async function updateExerciseStatus(
   id: string,
   status: ExerciseRow["status"],
   answer?: string,
   aiFeedback?: string
-): void {
-  const db = getDb();
-  db.prepare(`
-    UPDATE exercises
-    SET status          = @status,
-        my_answer       = COALESCE(@answer, my_answer),
-        attempts        = attempts + 1,
-        last_attempt_at = @now,
-        ai_feedback     = COALESCE(@aiFeedback, ai_feedback)
-    WHERE id = @id
-  `).run({
-    id,
-    status,
-    answer: answer ?? null,
-    aiFeedback: aiFeedback ?? null,
-    now: new Date().toISOString(),
+): Promise<void> {
+  await ensureSchema();
+  const db = getClient();
+  await db.execute({
+    sql: `
+      UPDATE exercises
+      SET status          = ?,
+          my_answer       = COALESCE(?, my_answer),
+          attempts        = attempts + 1,
+          last_attempt_at = ?,
+          ai_feedback     = COALESCE(?, ai_feedback)
+      WHERE id = ?
+    `,
+    args: [
+      status,
+      answer ?? null,
+      new Date().toISOString(),
+      aiFeedback ?? null,
+      id,
+    ],
   });
 }
 
-export function ensureExerciseExists(
-  id: string,
-  guiaId: string,
-  exerciseNumber: number
-): void {
-  const db = getDb();
-  db.prepare(`
-    INSERT OR IGNORE INTO exercises (id, guia_id, exercise_number)
-    VALUES (?, ?, ?)
-  `).run(id, guiaId, exerciseNumber);
+export async function upsertExercise(
+  row: Partial<ExerciseRow> & { id: string; guia_id: string }
+): Promise<void> {
+  await ensureSchema();
+  const db = getClient();
+  await db.execute({
+    sql: `
+      INSERT INTO exercises (id, guia_id, exercise_number, status, my_answer, attempts, last_attempt_at, ai_feedback)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        status          = COALESCE(excluded.status, status),
+        my_answer       = COALESCE(excluded.my_answer, my_answer),
+        attempts        = COALESCE(excluded.attempts, attempts),
+        last_attempt_at = COALESCE(excluded.last_attempt_at, last_attempt_at),
+        ai_feedback     = COALESCE(excluded.ai_feedback, ai_feedback)
+    `,
+    args: [
+      row.id,
+      row.guia_id,
+      row.exercise_number ?? null,
+      row.status ?? "pendiente",
+      row.my_answer ?? null,
+      row.attempts ?? 0,
+      row.last_attempt_at ?? null,
+      row.ai_feedback ?? null,
+    ],
+  });
 }

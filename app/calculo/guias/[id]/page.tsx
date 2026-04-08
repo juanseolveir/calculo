@@ -1,3 +1,5 @@
+export const dynamic = "force-dynamic";
+
 import { notFound } from "next/navigation";
 import Link from "next/link";
 import { loadGuiaById } from "@/lib/parser";
@@ -18,18 +20,20 @@ export default async function GuiaPage({ params }: Props) {
   if (!guia) notFound();
 
   // Ensure all exercises exist in DB
-  for (const ex of guia.exercises) {
-    ensureExerciseExists(ex.id, ex.guiaId, ex.number);
-  }
+  await Promise.all(
+    guia.exercises.map((ex) => ensureExerciseExists(ex.id, ex.guiaId, ex.number))
+  );
 
-  const rows = getExercisesByGuia(guia.id);
+  const rows = await getExercisesByGuia(guia.id);
   const rowMap = new Map(rows.map((r) => [r.id, r]));
 
   // Pre-render all exercise markdown
   const htmlMap = new Map<string, string>();
-  for (const ex of guia.exercises) {
-    htmlMap.set(ex.id, await mdToHtml(ex.rawMarkdown));
-  }
+  await Promise.all(
+    guia.exercises.map(async (ex) => {
+      htmlMap.set(ex.id, await mdToHtml(ex.rawMarkdown));
+    })
+  );
 
   const total = guia.exercises.length;
   const hechos = rows.filter((r) => r.status === "hecho").length;
@@ -37,7 +41,6 @@ export default async function GuiaPage({ params }: Props) {
 
   return (
     <div>
-      {/* Header */}
       <div className="mb-8">
         <Link
           href="/calculo/guias"
@@ -50,9 +53,7 @@ export default async function GuiaPage({ params }: Props) {
         <div className="flex items-start justify-between gap-4">
           <div>
             <h1 className="text-2xl font-bold text-slate-900">{guia.titulo}</h1>
-            <p className="text-slate-500 mt-1">
-              {total} ejercicios · {hechos} completados
-            </p>
+            <p className="text-slate-500 mt-1">{total} ejercicios · {hechos} completados</p>
           </div>
           <div className="text-right shrink-0">
             <div className="text-2xl font-bold text-blue-500">{pct}%</div>
@@ -60,16 +61,11 @@ export default async function GuiaPage({ params }: Props) {
           </div>
         </div>
 
-        {/* Progress bar */}
         <div className="mt-4 h-2 bg-slate-100 rounded-full overflow-hidden">
-          <div
-            className="h-full bg-blue-500 rounded-full transition-all"
-            style={{ width: `${pct}%` }}
-          />
+          <div className="h-full bg-blue-500 rounded-full transition-all" style={{ width: `${pct}%` }} />
         </div>
       </div>
 
-      {/* Exercise list */}
       <div className="space-y-3">
         {guia.exercises.map((ex) => {
           const row = rowMap.get(ex.id);
@@ -91,8 +87,6 @@ export default async function GuiaPage({ params }: Props) {
   );
 }
 
-// ── Exercise card ─────────────────────────────────────────────────────────────
-
 function ExerciseCard({
   exercise,
   row,
@@ -112,21 +106,13 @@ function ExerciseCard({
             {exercise.number}
           </div>
           <div>
-            <span className="text-sm font-medium text-slate-700">
-              Ejercicio {exercise.number}
-            </span>
-            <span className="ml-2 text-xs text-slate-400 capitalize">
-              {exercise.meta.tipo}
-            </span>
+            <span className="text-sm font-medium text-slate-700">Ejercicio {exercise.number}</span>
+            <span className="ml-2 text-xs text-slate-400 capitalize">{exercise.meta.tipo}</span>
           </div>
         </div>
         <div className="flex items-center gap-3">
           <StatusBadge status={status} />
-          <ExerciseModal
-            exercise={exercise}
-            row={row}
-            html={html}
-          />
+          <ExerciseModal exercise={exercise} row={row} html={html} />
         </div>
       </div>
     </div>
