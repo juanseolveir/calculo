@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useTransition } from "react";
+import { useRouter } from "next/navigation";
 import {
   Dialog,
   DialogContent,
@@ -31,6 +32,7 @@ interface Props {
 }
 
 export default function ExerciseModal({ exercise, row, html }: Props) {
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [answer, setAnswer] = useState(row?.my_answer ?? "");
   const [status, setStatus] = useState<Status>(
@@ -56,6 +58,8 @@ export default function ExerciseModal({ exercise, row, html }: Props) {
       setStatus(result.status as Status);
       setFeedback(result.feedback ?? "");
       setAttempts((a) => a + 1);
+      // Refresh server components so status badges update without navigating away
+      router.refresh();
     });
   }
 
@@ -63,6 +67,7 @@ export default function ExerciseModal({ exercise, row, html }: Props) {
     startMarkDone(async () => {
       await markDoneAction(exercise.id, exercise.guiaId);
       setStatus("hecho");
+      router.refresh();
     });
   }
 
@@ -167,9 +172,7 @@ export default function ExerciseModal({ exercise, row, html }: Props) {
         </div>
 
         {/* Feedback */}
-        {feedback && (
-          <FeedbackBox feedback={feedback} status={status} />
-        )}
+        {feedback && <FeedbackBox feedback={feedback} status={status} />}
 
         {/* Show answer toggle */}
         <div className="border-t border-slate-100 pt-4 mt-2">
@@ -199,25 +202,17 @@ export default function ExerciseModal({ exercise, row, html }: Props) {
 
 // ── Feedback box ──────────────────────────────────────────────────────────────
 
-function FeedbackBox({
-  feedback,
-  status,
-}: {
-  feedback: string;
-  status: Status;
-}) {
+function FeedbackBox({ feedback, status }: { feedback: string; status: Status }) {
   const styles: Record<Status, string> = {
     hecho: "bg-emerald-50 border-emerald-200 text-emerald-800",
     revision: "bg-yellow-50 border-yellow-200 text-yellow-800",
     pendiente: "bg-slate-50 border-slate-200 text-slate-700",
   };
-
   const titles: Record<Status, string> = {
     hecho: "✅ ¡Correcto!",
     revision: "🟡 Respuesta parcial",
     pendiente: "💬 Feedback",
   };
-
   return (
     <div className={`rounded-xl border p-4 text-sm ${styles[status]}`}>
       <p className="font-semibold mb-1">{titles[status]}</p>
