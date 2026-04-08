@@ -13,8 +13,9 @@ function getClient(): Client {
   const authToken = process.env.TURSO_AUTH_TOKEN;
 
   if (url && authToken && !url.includes("your-db-name")) {
-    // Turso cloud
-    _client = createClient({ url, authToken });
+    // Turso cloud — use https:// protocol for better serverless compatibility
+    const httpUrl = url.replace(/^libsql:\/\//, "https://");
+    _client = createClient({ url: httpUrl, authToken });
   } else {
     // Local file fallback for development
     _client = createClient({ url: "file:data/study.db" });
