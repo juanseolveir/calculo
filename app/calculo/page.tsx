@@ -17,10 +17,10 @@ export default async function DashboardPage() {
   const guias = loadAllGuias();
   const allRows = await getAllExercises();
 
-  const totalExercises = allRows.length;
+  const totalExercises = guias.reduce((sum, g) => sum + g.exercises.length, 0);
   const hechos = allRows.filter((r) => r.status === "hecho").length;
   const revision = allRows.filter((r) => r.status === "revision").length;
-  const pendientes = allRows.filter((r) => r.status === "pendiente").length;
+  const pendientes = totalExercises - hechos - revision;
   const globalPct = totalExercises > 0 ? Math.round((hechos / totalExercises) * 100) : 0;
 
   // Fetch per-guía rows concurrently
